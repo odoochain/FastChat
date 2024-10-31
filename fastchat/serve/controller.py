@@ -8,6 +8,7 @@ import dataclasses
 from enum import Enum, auto
 import json
 import logging
+import os
 import time
 from typing import List, Union
 import threading
@@ -51,6 +52,7 @@ class WorkerInfo:
     queue_length: int
     check_heart_beat: bool
     last_heart_beat: str
+    multimodal: bool
 
 
 def heart_beat_controller(controller):
@@ -71,7 +73,11 @@ class Controller:
         self.heart_beat_thread.start()
 
     def register_worker(
-        self, worker_name: str, check_heart_beat: bool, worker_status: dict
+        self,
+        worker_name: str,
+        check_heart_beat: bool,
+        worker_status: dict,
+        multimodal: bool,
     ):
         if worker_name not in self.worker_info:
             logger.info(f"Register a new worker: {worker_name}")
@@ -89,6 +95,7 @@ class Controller:
             worker_status["queue_length"],
             check_heart_beat,
             time.time(),
+            multimodal,
         )
 
         logger.info(f"Register done: {worker_name}, {worker_status}")
@@ -115,7 +122,9 @@ class Controller:
         self.worker_info = {}
 
         for w_name, w_info in old_info.items():
-            if not self.register_worker(w_name, w_info.check_heart_beat, None):
+            if not self.register_worker(
+                w_name, w_info.check_heart_beat, None, w_info.multimodal
+            ):
                 logger.info(f"Remove stale worker: {w_name}")
 
     def list_models(self):
@@ -123,6 +132,24 @@ class Controller:
 
         for w_name, w_info in self.worker_info.items():
             model_names.update(w_info.model_names)
+
+        return list(model_names)
+
+    def list_multimodal_models(self):
+        model_names = set()
+
+        for w_name, w_info in self.worker_info.items():
+            if w_info.multimodal:
+                model_names.update(w_info.model_names)
+
+        return list(model_names)
+
+    def list_language_models(self):
+        model_names = set()
+
+        for w_name, w_info in self.worker_info.items():
+            if not w_info.multimodal:
+                model_names.update(w_info.model_names)
 
         return list(model_names)
 
@@ -262,7 +289,10 @@ app = FastAPI()
 async def register_worker(request: Request):
     data = await request.json()
     controller.register_worker(
-        data["worker_name"], data["check_heart_beat"], data.get("worker_status", None)
+        data["worker_name"],
+        data["check_heart_beat"],
+        data.get("worker_status", None),
+        data.get("multimodal", False),
     )
 
 
@@ -274,6 +304,18 @@ async def refresh_all_workers():
 @app.post("/list_models")
 async def list_models():
     models = controller.list_models()
+    return {"models": models}
+
+
+@app.post("/list_multimodal_models")
+async def list_multimodal_models():
+    models = controller.list_multimodal_models()
+    return {"models": models}
+
+
+@app.post("/list_language_models")
+async def list_language_models():
+    models = controller.list_language_models()
     return {"models": models}
 
 
@@ -303,7 +345,12 @@ async def worker_api_get_status(request: Request):
     return controller.worker_api_get_status()
 
 
-if __name__ == "__main__":
+@app.get("/test_connection")
+async def worker_api_get_status(request: Request):
+    return "success"
+
+
+def create_controller():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=21001)
@@ -313,8 +360,30 @@ if __name__ == "__main__":
         choices=["lottery", "shortest_queue"],
         default="shortest_queue",
     )
+    parser.add_argument(
+        "--ssl",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Enable SSL. Requires OS Environment variables 'SSL_KEYFILE' and 'SSL_CERTFILE'.",
+    )
     args = parser.parse_args()
     logger.info(f"args: {args}")
 
     controller = Controller(args.dispatch_method)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return args, controller
+
+
+if __name__ == "__main__":
+    args, controller = create_controller()
+    if args.ssl:
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            log_level="info",
+            ssl_keyfile=os.environ["SSL_KEYFILE"],
+            ssl_certfile=os.environ["SSL_CERTFILE"],
+        )
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")

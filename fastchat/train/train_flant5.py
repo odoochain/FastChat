@@ -1,4 +1,4 @@
-# Adopted from tatsu-lab@stanford_alpaca. Below is the original copyright:
+# Adapted from tatsu-lab@stanford_alpaca. Below is the original copyright:
 #    Copyright 2023 Rohan Taori, Ishaan Gulrajani, Tianyi Zhang, Yann Dubois, Xuechen Li
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
@@ -231,7 +231,7 @@ def preprocess(
     """
     # add end signal and concatenate together
     conversations = []
-    header = f"{default_conversation.system}\n\n"
+    header = f"{default_conversation.system_message}\n\n"
     for source in sources:
         conversation = _add_speaker_and_signal(header, source, tokenizer)
         conversations.append(conversation)

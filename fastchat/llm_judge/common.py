@@ -14,7 +14,11 @@ from typing import Optional
 import openai
 import anthropic
 
-from fastchat.model.model_adapter import get_conversation_template
+from fastchat.model.model_adapter import (
+    get_conversation_template,
+    ANTHROPIC_MODEL_LIST,
+    OPENAI_MODEL_LIST,
+)
 
 # API setting constants
 API_MAX_RETRY = 16
@@ -24,7 +28,7 @@ API_ERROR_OUTPUT = "$ERROR$"
 TIE_DELTA = 0.1
 
 # Categories that need reference answers
-NEED_REF_CATS = ["math", "reasoning", "coding"]
+NEED_REF_CATS = ["math", "reasoning", "coding", "arena-hard-200"]
 
 # Extract scores from judgments
 two_score_pattern = re.compile("\[\[(\d+\.?\d*),\s?(\d+\.?\d*)\]\]")
@@ -42,6 +46,7 @@ temperature_config = {
     "reasoning": 0.0,
     "stem": 0.1,
     "humanities": 0.1,
+    "arena-hard-200": 0.0,
 }
 
 reverse_model_map = {
@@ -132,7 +137,8 @@ def run_judge_single(question, answer, judge, ref_answer, multi_turn=False):
     model = judge.model_name
     if ref_answer is not None:
         kwargs["ref_answer_1"] = ref_answer["choices"][0]["turns"][0]
-        kwargs["ref_answer_2"] = ref_answer["choices"][0]["turns"][1]
+        if multi_turn:
+            kwargs["ref_answer_2"] = ref_answer["choices"][0]["turns"][1]
 
     if multi_turn:
         user_prompt = judge.prompt_template["prompt_template"].format(
@@ -157,10 +163,10 @@ def run_judge_single(question, answer, judge, ref_answer, multi_turn=False):
     conv.append_message(conv.roles[0], user_prompt)
     conv.append_message(conv.roles[1], None)
 
-    if model in ["gpt-3.5-turbo", "gpt-4"]:
-        judgment = chat_compeletion_openai(model, conv, temperature=0, max_tokens=2048)
-    elif model in ["claude-v1", "claude-instant-v1"]:
-        judgment = chat_compeletion_anthropic(
+    if model in OPENAI_MODEL_LIST:
+        judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+    elif model in ANTHROPIC_MODEL_LIST:
+        judgment = chat_completion_anthropic(
             model, conv, temperature=0, max_tokens=1024
         )
     else:
@@ -183,7 +189,7 @@ def run_judge_single(question, answer, judge, ref_answer, multi_turn=False):
     return rating, user_prompt, judgment
 
 
-def play_a_match_single(match: MatchPair, output_file: str):
+def play_a_match_single(match: MatchSingle, output_file: str):
     question, model, answer, judge, ref_answer, multi_turn = (
         match.question,
         match.model,
@@ -231,7 +237,8 @@ def run_judge_pair(question, answer_a, answer_b, judge, ref_answer, multi_turn=F
     model = judge.model_name
     if ref_answer is not None:
         kwargs["ref_answer_1"] = ref_answer["choices"][0]["turns"][0]
-        kwargs["ref_answer_2"] = ref_answer["choices"][0]["turns"][1]
+        if multi_turn:
+            kwargs["ref_answer_2"] = ref_answer["choices"][0]["turns"][1]
 
     if multi_turn:
         system_prompt = judge.prompt_template["system_prompt"]
@@ -259,14 +266,14 @@ def run_judge_pair(question, answer_a, answer_b, judge, ref_answer, multi_turn=F
     conv.append_message(conv.roles[0], user_prompt)
     conv.append_message(conv.roles[1], None)
 
-    if model in ["gpt-3.5-turbo", "gpt-4"]:
+    if model in OPENAI_MODEL_LIST:
         conv.set_system_message(system_prompt)
-        judgment = chat_compeletion_openai(model, conv, temperature=0, max_tokens=2048)
-    elif model in ["claude-v1", "claude-instant-v1"]:
+        judgment = chat_completion_openai(model, conv, temperature=0, max_tokens=2048)
+    elif model in ANTHROPIC_MODEL_LIST:
         if system_prompt != "You are a helpful assistant.":
             user_prompt = "[Instruction]\n" + system_prompt + "\n\n" + user_prompt
             conv.messages[0][1] = user_prompt
-        judgment = chat_compeletion_anthropic(
+        judgment = chat_completion_anthropic(
             model, conv, temperature=0, max_tokens=1024
         )
     else:
@@ -397,7 +404,10 @@ def play_a_match_pair(match: MatchPair, output_file: str):
     return result
 
 
-def chat_compeletion_openai(model, conv, temperature, max_tokens):
+def chat_completion_openai(model, conv, temperature, max_tokens, api_dict=None):
+    if api_dict is not None:
+        openai.api_base = api_dict["api_base"]
+        openai.api_key = api_dict["api_key"]
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
         try:
@@ -418,11 +428,55 @@ def chat_compeletion_openai(model, conv, temperature, max_tokens):
     return output
 
 
-def chat_compeletion_anthropic(model, conv, temperature, max_tokens):
+def chat_completion_openai_azure(model, conv, temperature, max_tokens, api_dict=None):
+    openai.api_type = "azure"
+    openai.api_version = "2023-07-01-preview"
+    if api_dict is not None:
+        openai.api_base = api_dict["api_base"]
+        openai.api_key = api_dict["api_key"]
+    else:
+        openai.api_base = os.environ["AZURE_OPENAI_ENDPOINT"]
+        openai.api_key = os.environ["AZURE_OPENAI_KEY"]
+
+    if "azure-" in model:
+        model = model[6:]
+
     output = API_ERROR_OUTPUT
     for _ in range(API_MAX_RETRY):
         try:
-            c = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+            messages = conv.to_openai_api_messages()
+            response = openai.ChatCompletion.create(
+                engine=model,
+                messages=messages,
+                n=1,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            output = response["choices"][0]["message"]["content"]
+            break
+        except openai.error.OpenAIError as e:
+            print(type(e), e)
+            time.sleep(API_RETRY_SLEEP)
+        except openai.error.InvalidRequestError as e:
+            print(type(e), e)
+            break
+        except KeyError:
+            print(response)
+            break
+
+    return output
+
+
+def chat_completion_anthropic(model, conv, temperature, max_tokens, api_dict=None):
+    if api_dict is not None and "api_key" in api_dict:
+        api_key = api_dict["api_key"]
+    else:
+        api_key = os.environ["ANTHROPIC_API_KEY"]
+
+    output = API_ERROR_OUTPUT
+    for _ in range(API_MAX_RETRY):
+        try:
+            c = anthropic.Anthropic(api_key=api_key)
             prompt = conv.get_prompt()
             response = c.completions.create(
                 model=model,
@@ -439,7 +493,7 @@ def chat_compeletion_anthropic(model, conv, temperature, max_tokens):
     return output.strip()
 
 
-def chat_compeletion_palm(chat_state, model, conv, temperature, max_tokens):
+def chat_completion_palm(chat_state, model, conv, temperature, max_tokens):
     from fastchat.serve.api_provider import init_palm_chat
 
     assert model == "palm-2-chat-bison-001"
